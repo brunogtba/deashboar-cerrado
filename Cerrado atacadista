@@ -1,0 +1,389 @@
+[20:32, 09/06/2025] Bruno Martins: import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+from datetime import datetime, timedelta
+import sqlite3
+import smtplib
+from email.mime.text import MIMEText
+import time
+import random
+
+# Configuração da página
+st.set_page_config(
+    page_title="Cerrado Atacadista - Sistema de Gestão",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Criar banco de dados SQLite em arquivo permanente
+conn = sqlite3.connect('cerrado_atacadista.db', check_same_thread=False)
+c = conn.cursor()
+
+# Criar tabelas com campos específicos para atacado
+c.execute('''CREATE TABLE IF NOT EXISTS estoque (
+             id INTEGER PRIMARY KEY,
+             produto TEXT,
+             categoria TEXT,
+             lote TEXT,
+             quantidade INTEGER,
+             custo_unitario REAL,
+             preco_venda REAL,
+             data_validade DATE,
+             data_movimento DATE)''')
+
+c.execute('''CREATE TABLE IF NOT EXISTS vendas (
+             id INTEGER PRIMARY KEY,
+             cliente_id INTEGER,
+             produto TEXT,
+             quantidade INTEGER,
+             valor_total REAL,
+             desconto REAL,
+             forma_pagamento TEXT,
+             data_venda DATE,
+             status_entrega TEXT,
+             nota_fiscal TEXT)''')
+
+c.execute('''CREATE TABLE IF NOT EXISTS compras (
+             id INTEGER PRIMARY KEY,
+             produto TEXT,
+             fornecedor TEXT,
+             quantidade INTEGER,
+             custo_total REAL,
+             nota_fiscal TEXT,
+             data_compra DATE)''')
+
+c.execute('''CREATE TABLE IF NOT EXISTS despesas (
+             id INTEGER PRIMARY KEY,
+             descricao TEXT,
+             valor REAL,
+             categoria TEXT,
+             data DATE)''')
+
+c.execute('''CREATE TABLE IF NOT EXISTS clientes (
+             id INTEGER PRIMARY KEY,
+             nome TEXT,
+             tipo TEXT,
+             cnpj_cpf TEXT,
+             endereco TEXT,
+             limite_credito REAL,
+             data_cadastro DATE,
+             email TEXT,
+             telefone TEXT)''')
+
+c.execute('''CREATE TABLE IF NOT EXISTS entregas (
+             id INTEGER PRIMARY KEY,
+             venda_id INTEGER,
+             endereco_entrega TEXT,
+             data_prevista DATE,
+             data_entrega DATE,
+             status TEXT,
+             transportadora TEXT,
+             codigo_rastreio TEXT)''')
+
+c.execute('''CREATE TABLE IF NOT EXISTS perdas (
+             id INTEGER PRIMARY KEY,
+             produto TEXT,
+             quantidade INTEGER,
+             motivo TEXT,
+             data DATE,
+             lote TEXT,
+             valor_perda REAL)''')
+
+conn.commit()
+
+# Funções para operações no banco de dados
+def add_estoque(produto, categoria, lote, quantidade, custo_unitario, preco_venda, data_validade, data_movimento):
+    c.execute('''INSERT INTO estoque (produto, categoria, lote, quantidade, custo_unitario, preco_venda, data_validade, data_movimento)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', 
+              (produto, categoria, lote, quantidade, custo_unitario, preco_venda, data_validade, data_movimento))
+    conn.commit()
+
+def add_venda(cliente_id, produto, quantidade, valor_total, desconto, forma_pagamento, data_venda):
+    c.execute('''INSERT INTO vendas (cliente_id, produto, quantidade, valor_total, desconto, forma_pagamento, data_venda, status_entrega)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, 'Pendente')''', 
+              (cliente_id, produto, quantidade, valor_total, desconto, forma_pagamento, data_venda))
+    conn.commit()
+    return c.lastrowid
+
+def add_compra(produto, fornecedor, quantidade, custo_total, nota_fiscal, data_compra):
+    c.execute('''INSERT INTO compras (produto, fornecedor, quantidade, custo_total, nota_fiscal, data_compra)
+                 VALUES (?, ?, ?, ?, ?, ?)''', 
+              (produto, fornecedor, quantidade, custo_total, nota_fiscal, data_compra))
+    conn.commit()
+
+def add_despesa(descricao, valor, categoria, data):
+    c.execute('''INSERT INTO despesas (descricao, valor, categoria, data)
+                 VALUES (?, ?, ?, ?)''', 
+              (descricao, valor, categoria, data))
+    conn.commit()
+
+def add_cliente(nome, tipo, cnpj_cpf, endereco, limite_credito, data_cadastro, email, telefone):
+    c.execute('''INSERT INTO clientes (nome, tipo, cnpj_cpf, endereco, limite_credito, data_cadastro, email, telefone)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', 
+              (nome, tipo, cnpj_cpf, endereco, limite_credito, data_cadastro, email, telefone))
+    conn.commit()
+
+def add_entrega(venda_id, endereco_entrega, data_prevista, transportadora):
+    codigo_rastreio = f"CR{random.randint(10000000, 99999999)}BR"
+    c.execute('''INSERT INTO entregas (venda_id, endereco_entrega, data_prevista, transportadora, status, codigo_rastreio)
+                 VALUES (?, ?, ?, ?, 'Agendada', ?)''', 
+              (venda_id, endereco_entrega, data_prevista, transportadora, codigo_rastreio))
+    conn.commit()
+    return codigo_rastreio
+
+def add_perda(produto, quantidade, motivo, data, lote, valor_perda):
+    c.execute('''INSERT INTO perdas (produto, quantidade, motivo, data, lote, valor_perda)
+                 VALUES (?, ?, ?, ?, ?, ?)''', 
+              (produto, quantidade, motivo, data, lote, valor_perda))
+    conn.commit()
+    # Atualizar estoque (reduzir perda)
+    c.execute('''UPDATE estoque 
+                 SET quantidade = quantidade - ?
+                 WHERE produto = ? AND lote = ?''', 
+              (quantidade, produto, lote))
+    conn.commit()
+
+def emitir_nota_fiscal(venda_id, cliente_id, valor_total):
+    numero_nf = f"NF{random.randint(10000000, 99999999)}"
+    c.execute('''UPDATE vendas SET nota_fiscal = ? WHERE id = ?''', (numero_nf, venda_id))
+    conn.commit()
+    return numero_nf
+
+# Função para enviar e-mails
+def enviar_email(destinatario, assunto, mensagem):
+    try:
+        # Configurações do servidor (exemplo para Gmail)
+        smtp_server = "smtp.gmail.com"
+        port = 587
+        remetente = "seu_email@gmail.com"  # Substitua pelo seu e-mail
+        senha = "sua_senha_app"  # Substitua pela sua senha de app
+        
+        # Criar mensagem
+        msg = MIMEText(mensagem)
+        msg['Subject'] = assunto
+        msg['From'] = remetente
+        msg['To'] = destinatario
+        
+        # Enviar e-mail
+        server = smtplib.SMTP(smtp_server, port)
+        server.starttls()
+        server.login(remetente, senha)
+        server.sendmail(remetente, destinatario, msg.as_string())
+        server.quit()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao enviar e-mail: {str(e)}")
+        return False
+
+# Interface do usuário
+st.title("📊 Cerrado Atacadista - Sistema de Gestão Completo")
+
+# Menu lateral
+menu = st.sidebar.selectbox("Menu", [
+    "Dashboard", 
+    "Estoque", 
+    "Vendas", 
+    "Compras", 
+    "Despesas", 
+    "Clientes",
+    "Controle de Entregas",
+    "Gestão de Perdas",
+    "Notas Fiscais",
+    "Alertas"
+])
+
+# Página: Dashboard
+if menu == "Dashboard":
+    st.header("Visão Geral do Negócio")
+    
+    # Métricas principais
+    col1, col2, col3, col4 = st.columns(4)
+    
+    # Calcular métricas
+    total_vendas = c.execute("SELECT SUM(valor_total) FROM vendas").fetchone()[0] or 0
+    total_compras = c.execute("SELECT SUM(custo_total) FROM compras").fetchone()[0] or 0
+    total_despesas = c.execute("SELECT SUM(valor) FROM despesas").fetchone()[0] or 0
+    lucro_bruto = total_vendas - total_compras
+    lucro_liquido = lucro_bruto - total_despesas
+    
+    col1.metric("Total de Vendas", f"R$ {total_vendas:,.2f}")
+    col2.metric("Total de Compras", f"R$ {total_compras:,.2f}")
+    col3.metric("Lucro Bruto", f"R$ {lucro_bruto:,.2f}")
+    col4.metric("Lucro Líquido", f"R$ {lucro_liquido:,.2f}")
+    
+    # Gráficos
+    col1, col2 = st.columns(2)
+    
+    # Gráfico de vendas por categoria
+    vendas_cat = pd.read_sql('''SELECT e.categoria, SUM(v.valor_total) as total 
+                                FROM vendas v
+                                JOIN estoque e ON v.produto = e.produto
+                                GROUP BY e.categoria''', conn)
+    if not vendas_cat.empty:
+        fig = px.pie(vendas_cat, names='categoria', values='total', 
+                     title='Vendas por Categoria de Produto')
+        col1.plotly_chart(fig, use_container_width=True)
+    
+    # Gráfico de evolução mensal
+    vendas_mes = pd.read_sql('''SELECT strftime('%Y-%m', data_venda) as mes, 
+                                       SUM(valor_total) as total 
+                                FROM vendas 
+                                GROUP BY mes''', conn)
+    if not vendas_mes.empty:
+        fig = px.line(vendas_mes, x='mes', y='total', 
+                     title='Evolução Mensal de Vendas')
+        col2.plotly_chart(fig, use_container_width=True)
+    
+    # Top produtos
+    st.subheader("Produtos Mais Rentáveis")
+    produtos = pd.read_sql('''SELECT v.produto, 
+                                    SUM(v.valor_total) as vendas,
+                                    SUM(c.custo_total) as custo,
+                                    SUM(v.valor_total) - SUM(c.custo_total) as lucro
+                             FROM vendas v
+                             JOIN compras c ON v.produto = c.produto
+                             GROUP BY v.produto
+                             ORDER BY lucro DESC
+                             LIMIT 10''', conn)
+    st.dataframe(produtos.style.format({
+        'vendas': 'R$ {:.2f}',
+        'custo': 'R$ {:.2f}',
+        'lucro': 'R$ {:.2f}'
+    }))
+
+# Página: Estoque
+elif menu == "Estoque":
+    st.header("Gestão de Estoque")
+    
+    with st.expander("Adicionar Novo Produto"):
+        col1, col2 = st.columns(2)
+        produto = col1.text_input("Nome do Produto")
+        categoria = col1.selectbox("Categoria", ["Alimentos", "Bebidas", "Limpeza", "Higiene", "Material de Construção", "Outros"])
+        lote = col2.text_input("Número do Lote")
+        quantidade = col2.number_input("Quantidade Inicial", min_value=1, value=100)
+        custo_unitario = col1.number_input("Custo Unitário", min_value=0.0, value=0.0)
+        preco_venda = col2.number_input("Preço de Venda", min_value=0.0, value=0.0)
+        data_validade = col1.date_input("Data de Validade", value=None)
+        data_movimento = col2.date_input("Data do Movimento", datetime.today())
+        
+        if st.button("Cadastrar Produto"):
+            add_estoque(produto, categoria, lote, quantidade, custo_unitario, preco_venda, data_validade, data_movimento)
+            st.success("Produto cadastrado com sucesso!")
+    
+    with st.expander("Atualizar Estoque"):
+        produtos = pd.read_sql("SELECT produto FROM estoque", conn)
+        produto = st.selectbox("Selecione o Produto", produtos['produto'])
+        acao = st.radio("Ação", ["Entrada", "Saída", "Ajuste"])
+        quantidade = st.number_input("Quantidade", min_value=1, value=1)
+        motivo = st.text_input("Motivo do Ajuste", value="")
+        
+        if st.button("Atualizar Estoque"):
+            # Lógica para atualização
+            st.success("Estoque atualizado com sucesso!")
+    
+    st.subheader("Inventário Atual")
+    estoque_df = pd.read_sql("SELECT * FROM estoque", conn)
+    st.dataframe(estoque_df)
+    
+    st.subheader("Alertas Importantes")
+    # Produtos próximos do vencimento
+    proximos_vencer = pd.read_sql("SELECT produto, data_validade FROM estoque WHERE data_validade <= DATE('now', '+30 days')", conn)
+    if not proximos_vencer.empty:
+        st.warning("⚠️ Produtos próximos do vencimento:")
+        st.dataframe(proximos_vencer)
+    
+    # Estoque baixo
+    estoque_baixo = pd.read_sql("SELECT produto, quantidade FROM estoque WHERE quantidade <= 10", conn)
+    if not estoque_baixo.empty:
+        st.error("🚨 Produtos com estoque baixo:")
+        st.dataframe(estoque_baixo)
+
+# Página: Vendas
+elif menu == "Vendas":
+    st.header("Gestão de Vendas")
+    
+    with st.expander("Registrar Nova Venda"):
+        col1, col2 = st.columns(2)
+        
+        # Obter lista de clientes
+        clientes = pd.read_sql("SELECT id, nome FROM clientes", conn)
+        cliente_id = col1.selectbox("Cliente", clientes['id'].astype(str) + " - " + clientes['nome'])
+        cliente_id = int(cliente_id.split(" - ")[0])
+        
+        # Seleção de produtos
+        produtos = pd.read_sql("SELECT produto, preco_venda FROM estoque", conn)
+        produto = col1.selectbox("Produto", produtos['produto'])
+        preco_unitario = produtos[produtos['produto'] == produto]['preco_venda'].values[0]
+        
+        quantidade = col2.number_input("Quantidade", min_value=1, value=1)
+        desconto = col2.number_input("Desconto (%)", min_value=0, max_value=100, value=0)
+        forma_pagamento = col1.selectbox("Forma de Pagamento", ["Dinheiro", "Cartão Crédito", "Cartão Débito", "PIX", "Boleto", "Prazo"])
+        data_venda = col2.date_input("Data da Venda", datetime.today())
+        
+        # Cálculo do valor
+        valor_bruto = quantidade * preco_unit…
+[20:56, 09/06/2025] Bruno Martins: df = pd.read_sql_query("SELECT * FROM nome_da_sua_tabela", conn)
+[20:57, 09/06/2025] Bruno Martins: fig = px.bar(df, x="coluna_x", y="coluna_y", title="Exemplo de gráfico")
+st.plotly_chart(fig)
+[20:57, 09/06/2025] Bruno Martins: filtro = st.selectbox("Escolha uma categoria", df["categoria"].unique())
+df_filtrado = df[df["categoria"] == filtro]
+st.dataframe(df_filtrado)
+[21:01, 09/06/2025] Bruno Martins: import streamlit as st
+import pandas as pd
+import plotly.express as px
+import sqlite3
+
+# Configuração da página
+st.set_page_config(page_title="Cerrado Atacadista - Dashboard", layout="wide")
+
+# Conexão com banco de dados
+conn = sqlite3.connect("cerrado_atacadista.db", check_same_thread=False)
+
+# --- CABEÇALHO ---
+st.markdown("<h1 style='text-align: center; color: #2c3e50;'>📊 Dashboard - Cerrado Atacadista</h1>", unsafe_allow_html=True)
+st.markdown("---")
+
+# --- DADOS ---
+df_entregas = pd.read_sql_query("SELECT * FROM entregas", conn)
+df_despesas = pd.read_sql_query("SELECT * FROM despesas", conn)
+df_perdas = pd.read_sql_query("SELECT * FROM perdas", conn)
+
+# --- ENTREGAS ---
+st.subheader("🚚 Entregas Realizadas")
+
+col1, col2 = st.columns(2)
+with col1:
+    fig_entrega = px.bar(df_entregas, x="data_entrega", y="valor", color="transportadora", title="Entregas por Data")
+    st.plotly_chart(fig_entrega, use_container_width=True)
+
+with col2:
+    total = df_entregas["valor"].sum()
+    st.metric("Total Entregue (R$)", f"{total:,.2f}")
+
+st.dataframe(df_entregas, use_container_width=True)
+
+# --- DESPESAS ---
+st.subheader("💰 Despesas da Operação")
+
+col3, col4 = st.columns(2)
+with col3:
+    fig_despesa = px.pie(df_despesas, names="categoria", values="valor", title="Distribuição de Despesas")
+    st.plotly_chart(fig_despesa, use_container_width=True)
+
+with col4:
+    total_despesa = df_despesas["valor"].sum()
+    st.metric("Total em Despesas (R$)", f"{total_despesa:,.2f}")
+
+st.dataframe(df_despesas, use_container_width=True)
+
+# --- PERDAS ---
+st.subheader("📉 Perdas de Produto")
+
+fig_perda = px.bar(df_perdas, x="produto", y="valor", title="Perdas por Produto", color="produto")
+st.plotly_chart(fig_perda, use_container_width=True)
+st.dataframe(df_perdas, use_container_width=True)
+
+# Rodapé
+st.markdown("---")
+st.markdown("<small>© 2025 Cerrado Atacadista | Desenvolvido com Python & Streamlit</small>", unsafe_allow_html=True)
